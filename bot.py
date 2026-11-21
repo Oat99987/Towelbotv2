@@ -71,6 +71,12 @@ async def on_ready():
     if user is None:
         log.error('Connected without a bot user')
         return
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name='the server',
+        )
+    )
     log.info('Connected as %s (%s)', user, user.id)
 
 
