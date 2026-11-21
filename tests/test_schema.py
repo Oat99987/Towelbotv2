@@ -30,3 +30,12 @@ def test_all_cog_modules_import():
     assert len(imported) >= 15
     for module_name in imported:
         __import__(module_name)
+
+def test_setup_dashboard_views_fit_discord_component_limit():
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from cogs.setup import ChannelSettingsView, RoleSettingsView, SetupDashboard
+
+    for view in (SetupDashboard(object()), ChannelSettingsView(object()), RoleSettingsView(object())):
+        assert len(view.children) <= 5
+        view.stop()

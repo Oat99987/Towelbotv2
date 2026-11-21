@@ -121,11 +121,24 @@ class SetupDashboard(discord.ui.View):
     def __init__(self, cog):
         super().__init__(timeout=900)
         self.cog = cog
-        for key, label in CHANNEL_KEYS:
-            self.add_item(ChannelSelect(cog, key, label))
-        self.add_item(RoleSelect(cog, 'staff', 'Staff'))
-        self.add_item(RoleSelect(cog, 'citizen', 'Citizen'))
-        self.add_item(RoleSelect(cog, 'immigrant', 'Immigrant'))
+
+    @discord.ui.button(label='Configure channels', style=discord.ButtonStyle.primary, emoji='📡')
+    async def configure_channels(self, interaction, button):
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(embed=status_embed('Administrators only', 'You need **Manage Server** permission to change setup.', 'error'))
+        await interaction.response.send_message(
+            embed=embed('📡 Channel settings', 'Choose an existing resource for each feature. No resources are created from this panel.', 'brand'),
+            view=ChannelSettingsView(self.cog),
+        )
+
+    @discord.ui.button(label='Configure roles', style=discord.ButtonStyle.primary, emoji='🎭')
+    async def configure_roles(self, interaction, button):
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(embed=status_embed('Administrators only', 'You need **Manage Server** permission to change setup.', 'error'))
+        await interaction.response.send_message(
+            embed=embed('🎭 Role settings', 'Choose the existing roles used by TowelBot.', 'brand'),
+            view=RoleSettingsView(self.cog),
+        )
 
     @discord.ui.button(label='Create missing resources', style=discord.ButtonStyle.primary, emoji='🔧')
     async def confirm_creation(self, interaction, button):
@@ -139,6 +152,20 @@ class SetupDashboard(discord.ui.View):
             ),
             view=CreateResourcesConfirm(self.cog),
         )
+
+
+class ChannelSettingsView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=900)
+        for key, label in CHANNEL_KEYS:
+            self.add_item(ChannelSelect(cog, key, label))
+
+
+class RoleSettingsView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=900)
+        for key, label in (('staff', 'Staff'), ('citizen', 'Citizen'), ('immigrant', 'Immigrant')):
+            self.add_item(RoleSelect(cog, key, label))
 
 
 class Setup(commands.Cog):
