@@ -12,14 +12,14 @@ class VoteView(discord.ui.View):
         async def callback(interaction):
             citizen=role(interaction.guild,self.cog.bot,"citizen")
             if not citizen or citizen not in interaction.user.roles:
-                return await interaction.response.send_message("Only citizens may vote.",ephemeral=True)
+                return await interaction.response.send_message("Only citizens may vote.")
             election=await self.cog.bot.db.fetchone("SELECT status FROM elections WHERE id=?",(self.election_id,))
-            if not election or election["status"]!="open": return await interaction.response.send_message("Voting is closed.",ephemeral=True)
+            if not election or election["status"]!="open": return await interaction.response.send_message("Voting is closed.")
             try:
                 await self.cog.bot.db.execute("INSERT INTO election_votes(election_id,voter_id,candidate_id) VALUES(?,?,?)",(self.election_id,interaction.user.id,candidate_id))
             except Exception:
-                return await interaction.response.send_message("Your vote has already been recorded.",ephemeral=True)
-            await interaction.response.send_message("Vote recorded. Your choice is not displayed publicly.",ephemeral=True)
+                return await interaction.response.send_message("Your vote has already been recorded.")
+            await interaction.response.send_message("Vote recorded. Your choice is not displayed publicly.")
         return callback
 
 class Elections(commands.Cog):

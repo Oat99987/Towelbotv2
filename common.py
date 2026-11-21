@@ -1,13 +1,25 @@
 import discord
 from datetime import datetime, timezone
 
-COLORS = {'success': 0x2ECC71, 'warning': 0xF1C40F, 'error': 0xE74C3C, 'info': 0x3498DB}
+COLORS = {
+    'success': 0x2ECC71,
+    'warning': 0xF1C40F,
+    'error': 0xE74C3C,
+    'info': 0x3498DB,
+    'brand': 0x5865F2,
+}
 
 
 def embed(title, description='', kind='info'):
     result = discord.Embed(title=title, description=description, color=COLORS.get(kind, COLORS['info']), timestamp=datetime.now(timezone.utc))
-    result.set_footer(text='TowelBot • Administration')
+    result.set_author(name='TowelBot')
+    result.set_footer(text='TowelBot • Server Management')
     return result
+
+
+def status_embed(title, details, kind='success'):
+    icons = {'success': '✅', 'warning': '⚠️', 'error': '❌', 'info': 'ℹ️'}
+    return embed(f'{icons.get(kind, "ℹ️")} {title}', details, kind)
 
 
 def cfg_id(bot, section, key):
@@ -43,6 +55,26 @@ def admin():
         return bool(ctx.guild and (ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_guild))
     from discord.ext import commands
     return commands.check(predicate)
+
+
+def staff_only():
+    async def predicate(ctx):
+        configured = role(ctx.guild, ctx.bot, 'staff')
+        return bool(
+            ctx.author.guild_permissions.administrator
+            or ctx.author.guild_permissions.manage_guild
+            or (configured and configured in ctx.author.roles)
+        )
+    from discord.ext import commands
+    return commands.check(predicate)
+
+
+async def log_action(bot, guild, actor, action, target=None, details=''):
+    await audit(bot, guild, actor, action, target, details)
+
+
+def configured_id(bot, section, key):
+    return cfg_id(bot, section, key)
 
 
 def staff_role_check(bot):

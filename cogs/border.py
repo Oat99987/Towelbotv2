@@ -1,9 +1,9 @@
 import json
-import re
+
 import discord
 from discord import app_commands
 from discord.ext import commands
-from common import embed, audit
+from common import embed, status_embed, audit
 
 VERIFICATION_NAME = '🚧-verification'
 
@@ -26,17 +26,17 @@ class AddQuestionModal(discord.ui.Modal, title='Add a border question'):
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id or interaction.guild_id != self.guild_id:
-            return await interaction.response.send_message('This setup session belongs to another administrator.', ephemeral=True)
+            return await interaction.response.send_message(embed=status_embed('Setup session protected','This setup belongs to another administrator.','error'))
         draft = self.cog.setup_drafts.setdefault((self.guild_id, self.user_id), [])
         if len(draft) >= 25:
-            return await interaction.response.send_message('Discord forms support up to 25 questions in this setup.', ephemeral=True)
+            return await interaction.response.send_message(embed=status_embed('Question limit reached','You can add up to **25** application questions.','warning'))
         label = str(self.question.value).strip()
         if not label:
-            return await interaction.response.send_message('Question cannot be blank.', ephemeral=True)
+            return await interaction.response.send_message(embed=status_embed('Question required','Enter a question before saving.','error'))
         draft.append(label)
         await interaction.response.send_message(
             embed=embed('Question saved', f'**Question {len(draft)}:** {discord.utils.escape_markdown(label)}\n\nAdd another question, or finish the border setup.', 'success'),
-            view=QuestionWizard(self.cog, self.guild_id, self.user_id), ephemeral=True
+            view=QuestionWizard(self.cog, self.guild_id, self.user_id)
         )
 
 
@@ -47,7 +47,7 @@ class QuestionWizard(discord.ui.View):
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.user_id or interaction.guild_id != self.guild_id:
-            await interaction.response.send_message('This setup session belongs to another administrator.', ephemeral=True)
+            await interaction.response.send_message(embed=status_embed('Setup session protected','This setup belongs to another administrator.','error'))
             return False
         return True
 
@@ -59,18 +59,28 @@ class QuestionWizard(discord.ui.View):
     async def finish(self, interaction, button):
         questions = self.cog.setup_drafts.get((self.guild_id, self.user_id), [])
         if not questions:
-            return await interaction.response.send_message('Add at least one question before finishing.', ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
+            return await interaction.response.send_message(embed=status_embed('Add a question','Add at least one application question before finishing setup.','warning'))
+        await interaction.response.defer(thinking=True)
         try:
             await self.cog.save_questions_and_panel(interaction.guild, questions)
             self.cog.setup_drafts.pop((self.guild_id, self.user_id), None)
             await audit(self.cog.bot, interaction.guild, interaction.user, 'Border setup completed', details=f'{len(questions)} application questions configured.')
             for child in self.children:
-                child.disabled = True
-            await interaction.message.edit(embed=embed('Border setup complete', f'Saved **{len(questions)}** application questions and posted the application panel in **{VERIFICATION_NAME}**. Immigrants can only view that verification channel.', 'success'), view=self)
-            await interaction.followup.send('Border setup is complete.', ephemeral=True)
+                setattr(child, 'disabled', True)
+            try:
+                await interaction.message.edit(embed=embed('Border setup complete', f'Saved **{len(questions)}** application questions and posted the application panel in **{VERIFICATION_NAME}**. Immigrants can only view that verification channel.', 'success'), view=self)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+            await interaction.followup.send(embed=status_embed('Border setup complete', f'Saved **{len(questions)}** application questions and published the public application panel.', 'success'))
+        except discord.Forbidden:
+            await interaction.followup.send(embed=embed('Border setup failed', 'Discord denied a role, channel, or message operation. Check TowelBot permissions and role hierarchy.', 'error'))
+        except discord.NotFound as exc:
+            await interaction.followup.send(embed=embed('Border setup failed', f'The message or resource no longer exists (Discord error {exc.code}). Run `/border setup` again.', 'error'))
+        except discord.HTTPException as exc:
+            await interaction.followup.send(embed=embed('Border setup failed', f'Discord rejected the operation: {exc.status} — {exc.text[:300]}', 'error'))
         except Exception as exc:
-            await interaction.followup.send(f'Could not finish setup: `{type(exc).__name__}: {str(exc)[:500]}`. Check bot.log and bot permissions.', ephemeral=True)
+            self.cog.logger.exception('Border setup wizard finish failed')
+            await interaction.followup.send(embed=embed('Border setup failed', f'Unexpected error: `{type(exc).__name__}: {str(exc)[:500]}`. Check bot.log.', 'error'))
 
 
 class ApplicationModal(discord.ui.Modal):
@@ -89,13 +99,21 @@ class ApplicationModal(discord.ui.Modal):
         next_page = self.page + 1
         if next_page * 5 < len(self.questions):
             return await interaction.response.send_modal(ApplicationModal(self.cog, self.questions, next_page, self.answers))
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         try:
             await self.cog.submit_application(interaction, self.answers)
-            await interaction.followup.send('Your application was submitted to the border officers. You will remain an immigrant until it is reviewed.', ephemeral=True)
+            await interaction.followup.send(embed=status_embed(
+                'Application submitted',
+                'Your citizenship application was sent to the border officers. A review decision will be recorded in your application history.',
+                'success',
+            ))
         except Exception as exc:
             self.cog.logger.exception('Application submission failed')
-            await interaction.followup.send(f'Your application could not be submitted: `{type(exc).__name__}`. Please contact a moderator.', ephemeral=True)
+            await interaction.followup.send(embed=status_embed(
+                'Application not submitted',
+                f'{type(exc).__name__}: {str(exc)[:500]}\nPlease contact a server administrator.',
+                'error',
+            ))
 
 
 class BorderPanel(discord.ui.View):
@@ -106,17 +124,17 @@ class BorderPanel(discord.ui.View):
     @discord.ui.button(label='Apply for citizenship', style=discord.ButtonStyle.success, emoji='📝', custom_id='nation:border:apply:v2')
     async def apply(self, interaction, button):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message('Use this application inside the server.', ephemeral=True)
+            return await interaction.response.send_message(embed=status_embed('Server required','Use this application inside the server.','error'))
         citizen = self.cog.get_role(interaction.guild, 'citizen')
         if citizen and citizen in interaction.user.roles:
-            return await interaction.response.send_message('You are already a citizen.', ephemeral=True)
+            return await interaction.response.send_message(embed=status_embed('Already a citizen','Your Discord account already has the configured Citizen role.','info'))
         existing = await self.cog.bot.db.fetchone("SELECT id FROM applications WHERE guild_id=? AND user_id=? AND status='pending'", (interaction.guild.id, interaction.user.id))
         if existing:
-            return await interaction.response.send_message('You already have a pending application.', ephemeral=True)
+            return await interaction.response.send_message(embed=status_embed('Application pending','You already have a pending citizenship application.','warning'))
         rows = await self.cog.bot.db.fetchall('SELECT label FROM border_questions WHERE guild_id=? ORDER BY position', (interaction.guild.id,))
         questions = [row['label'] for row in rows]
         if not questions:
-            return await interaction.response.send_message('Applications are temporarily closed because no questions are configured.', ephemeral=True)
+            return await interaction.response.send_message(embed=status_embed('Applications unavailable','No citizenship questions are configured yet.','warning'))
         await interaction.response.send_modal(ApplicationModal(self.cog, questions, 0, {}))
 
 
@@ -129,37 +147,37 @@ class ReviewView(discord.ui.View):
         staff = self.cog.get_role(interaction.guild, 'staff')
         allowed = interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild or (staff and staff in interaction.user.roles)
         if not allowed:
-            await interaction.response.send_message('Only Nation Staff can review applications.', ephemeral=True)
+            await interaction.response.send_message(embed=status_embed('Nation Staff only','Only administrators or configured Nation Staff can review applications.','error'))
             return False
         return True
 
     @discord.ui.button(label='Approve', style=discord.ButtonStyle.success, emoji='✅')
     async def approve(self, interaction, button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         row = await self.cog.bot.db.fetchone('SELECT status FROM applications WHERE id=? AND guild_id=?', (self.application_id, interaction.guild.id))
         if not row or row['status'] != 'pending':
-            return await interaction.followup.send('This application has already been reviewed.', ephemeral=True)
+            return await interaction.followup.send(embed=status_embed('Already reviewed','This application has already been approved or denied.','warning'))
         member = interaction.guild.get_member(self.applicant_id)
         citizen = self.cog.get_role(interaction.guild, 'citizen')
         immigrant = self.cog.get_role(interaction.guild, 'immigrant')
         if not member or not citizen:
-            return await interaction.followup.send('Applicant is no longer in the server or the Citizen role is missing.', ephemeral=True)
+            return await interaction.followup.send(embed=status_embed('Review unavailable','The applicant left the server or the configured Citizen role is missing.','error'))
         try:
             if immigrant and immigrant in member.roles:
                 await member.remove_roles(immigrant, reason=f'Application #{self.application_id} approved')
             await member.add_roles(citizen, reason=f'Application #{self.application_id} approved')
         except discord.Forbidden:
-            return await interaction.followup.send('I cannot manage these roles. Move my bot role above Immigrant and Citizen.', ephemeral=True)
+            return await interaction.followup.send(embed=status_embed('Role hierarchy issue','Move TowelBot above the Immigrant and Citizen roles, then try again.','error'))
         await self.cog.bot.db.execute("UPDATE applications SET status='approved',reviewer_id=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?", (interaction.user.id, self.application_id))
         try:
             await member.send(f'Your citizenship application in **{interaction.guild.name}** has been approved. Welcome, citizen!')
         except discord.HTTPException:
             pass
         for child in self.children:
-            child.disabled = True
+            setattr(child, 'disabled', True)
         await interaction.message.edit(view=self)
         await audit(self.cog.bot, interaction.guild, interaction.user, 'Citizenship application approved', member, f'Application #{self.application_id}')
-        await interaction.followup.send('Approved. Immigrant role removed and Citizen role assigned.', ephemeral=True)
+        await interaction.followup.send(embed=status_embed('Application approved','Immigrant role removed and Citizen role assigned.','success'))
 
     @discord.ui.button(label='Deny', style=discord.ButtonStyle.danger, emoji='✖️')
     async def deny(self, interaction, button):
@@ -174,10 +192,10 @@ class DenyApplicationModal(discord.ui.Modal, title='Deny citizenship application
         self.cog, self.application_id, self.applicant_id = cog, application_id, applicant_id
 
     async def on_submit(self, interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         row = await self.cog.bot.db.fetchone("SELECT status FROM applications WHERE id=? AND guild_id=?", (self.application_id, interaction.guild.id))
         if not row or row['status'] != 'pending':
-            return await interaction.followup.send('This application has already been reviewed.', ephemeral=True)
+            return await interaction.followup.send(embed=status_embed('Already reviewed','This application has already been approved or denied.','warning'))
         reason = str(self.reason.value)
         await self.cog.bot.db.execute("UPDATE applications SET status='denied',reviewer_id=?,reason=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?", (interaction.user.id, reason, self.application_id))
         member = interaction.guild.get_member(self.applicant_id)
@@ -187,13 +205,13 @@ class DenyApplicationModal(discord.ui.Modal, title='Deny citizenship application
             except discord.HTTPException:
                 pass
         await audit(self.cog.bot, interaction.guild, interaction.user, 'Citizenship application denied', member, f'Application #{self.application_id}: {reason}')
-        await interaction.followup.send('Application denied. The member remains an immigrant and can still see only the verification channel.', ephemeral=True)
+        await interaction.followup.send(embed=status_embed('Application denied','The member remains an immigrant and retains verification-area access.','warning'))
 
 
 class Border(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.logger = __import__('logging').getLogger('nationbot.border')
+        self.logger = __import__('logging').getLogger('TowelBot.border')
         self.setup_drafts = {}
 
     def get_role(self, guild, key):
@@ -204,6 +222,10 @@ class Border(commands.Cog):
         found = discord.utils.get(guild.roles, name=name)
         if found is None:
             found = await guild.create_role(name=name, color=color, hoist=True, reason='Nation bot border setup')
+        if guild.me and found >= guild.me.top_role:
+            raise PermissionError(
+                f'The **{name}** role is above TowelBot in the role hierarchy. Move TowelBot above it and run setup again.'
+            )
         self.bot.config.setdefault('roles', {})[key] = found.id
         return found
 
@@ -240,8 +262,15 @@ class Border(commands.Cog):
                 overwrites[citizen] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=True, connect=True, speak=True)
             if bot_member:
                 overwrites[bot_member] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=True, manage_messages=True, connect=True, speak=True)
-            await target.edit(overwrites=overwrites, reason='Nation bot: immigrant/citizen access policy')
-            changed += 1
+            try:
+                await target.edit(overwrites=overwrites, reason='Nation bot: immigrant/citizen access policy')
+                changed += 1
+            except discord.Forbidden:
+                self.logger.warning('Could not update permissions for channel/category %s', target.id)
+            except discord.NotFound:
+                self.logger.warning('Channel/category %s no longer exists', target.id)
+            except discord.HTTPException as exc:
+                self.logger.warning('Could not update channel/category %s: %s', target.id, exc.text)
         return changed
 
     async def save_questions_and_panel(self, guild, questions):
@@ -312,11 +341,20 @@ class Border(commands.Cog):
     async def border_setup(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         try:
-            immigrant, citizen, verification, changed, assigned = await self.run_border_setup(interaction.guild)
-            self.setup_drafts[(interaction.guild.id, interaction.user.id)] = []
-            await interaction.followup.send(embed=embed('Border access configured', f'Created/checked {immigrant.mention} and {citizen.mention}.\n\nUpdated permissions on **{changed}** existing channels/categories.\nAssigned **{assigned}** existing members the Immigrant role.\nVerification channel: {verification.mention}\n\n**Next:** add your application questions one at a time below, then finish setup to publish the application panel.', 'success'), view=QuestionWizard(self, interaction.guild.id, interaction.user.id))
+            guild = interaction.guild
+            if guild is None:
+                return await interaction.followup.send(embed=status_embed('Server required','Run border setup inside a server.','error'))
+            immigrant, citizen, verification, changed, assigned = await self.run_border_setup(guild)
+            self.setup_drafts[(guild.id, interaction.user.id)] = []
+            await interaction.followup.send(embed=embed('Border access configured', f'Created/checked {immigrant.mention} and {citizen.mention}.\n\nUpdated permissions on **{changed}** existing channels/categories.\nAssigned **{assigned}** existing members the Immigrant role.\nVerification channel: {verification.mention}\n\n**Next:** add your application questions one at a time below, then finish setup to publish the application panel.', 'success'), view=QuestionWizard(self, guild.id, interaction.user.id))
+        except PermissionError as exc:
+            await interaction.followup.send(embed=embed('Border setup failed', str(exc), 'error'))
         except discord.Forbidden:
             await interaction.followup.send(embed=embed('Border setup failed', 'Discord blocked a role/channel change. Give me Manage Roles and Manage Channels, then move my bot role above Immigrant and Citizen.', 'error'))
+        except discord.NotFound as exc:
+            await interaction.followup.send(embed=embed('Border setup failed', f'A Discord resource was missing (error {exc.code}). Refresh the server and run `/border setup` again.', 'error'))
+        except discord.HTTPException as exc:
+            await interaction.followup.send(embed=embed('Border setup failed', f'Discord rejected the setup: {exc.status} — {exc.text[:300]}', 'error'))
         except Exception as exc:
             self.logger.exception('Border setup failed')
             await interaction.followup.send(embed=embed('Border setup failed', 'An unexpected error occurred. Check bot.log for details.', 'error'))

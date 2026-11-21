@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from common import admin, audit
+from common import admin, audit, embed
 
 class TempVoice(commands.Cog):
     def __init__(self,bot): self.bot=bot

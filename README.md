@@ -1,6 +1,8 @@
-# Nation Community Discord Bot
+# TowelBot
 
-Python `discord.py` bot with SQLite storage and separate cogs.
+TowelBot is a multi-server Discord bot with persistent SQLite storage and modular
+`discord.py` cogs for citizenship, government, courts, territories, profiles,
+leveling, moderation, tickets, elections, and logging.
 
 ## Requirements
 
@@ -27,7 +29,9 @@ Run these commands as a server administrator:
 
 ### 1. `/setup`
 
-Creates or repairs the general bot layout: `Nation Staff`, `Muted`, and `Jailed` roles; community and administration categories; welcome, announcements, application review, and log channels. It is intentionally separate from the border setup.
+Opens the setup dashboard. It does not create channels or categories automatically.
+Administrators may select existing channels and roles or explicitly confirm creation
+of missing TowelBot resources.
 
 ### 2. `/border setup`
 
@@ -71,4 +75,5 @@ Back up the `data` folder and `config.json` before moving hosts or reinstalling.
 - Re-invite the bot with the `bot` and `applications.commands` OAuth scopes.
 - Restart the bot after replacing files.
 
-This project is syntax-checked, but it still needs a live test in a private Discord server. Discord role hierarchy and permission overwrites can only be fully verified in your server.
+Run `python -m compileall -q .` and `python -m pytest -q` before deployment.
+Discord role hierarchy and permission overwrites require a live server test.

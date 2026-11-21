@@ -1,93 +1,176 @@
 import discord
-import logging
 from discord import app_commands
 from discord.ext import commands
-from common import embed, audit
+
+from common import embed, status_embed
+
+
+CHANNEL_KEYS = (
+    ('welcome', 'Welcome'),
+    ('announcement', 'Announcements'),
+    ('logging', 'Unified logging'),
+    ('application_review', 'Application review'),
+    ('ticket_category', 'Ticket category'),
+)
+
+
+class ChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog, key, label):
+        super().__init__(
+            placeholder=f'Select {label.lower()} channel',
+            channel_types=[discord.ChannelType.text, discord.ChannelType.category],
+            min_values=1,
+            max_values=1,
+        )
+        self.cog, self.key = cog, key
+
+    async def callback(self, interaction):
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(embed=status_embed('Administrators only', 'You need **Manage Server** permission to change setup.', 'error'))
+        selected = self.values[0]
+        if not isinstance(selected, (discord.TextChannel, discord.CategoryChannel)):
+            return await interaction.response.send_message(embed=status_embed('Invalid selection', 'Please select a text channel or category.', 'error'))
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message(embed=status_embed('Server required', 'Run this option inside a server.', 'error'))
+        await self.cog.bot.db.set_config(guild.id, 'channels', self.key, selected.id)
+        await interaction.response.send_message(
+            embed=status_embed('Setting saved', f'**{self.placeholder}**\n{selected.mention}', 'success')
+        )
+
+
+class RoleSelect(discord.ui.RoleSelect):
+    def __init__(self, cog, key, label):
+        super().__init__(placeholder=f'Select {label.lower()} role', min_values=1, max_values=1)
+        self.cog, self.key = cog, key
+
+    async def callback(self, interaction):
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(embed=status_embed('Administrators only', 'You need **Manage Server** permission to change setup.', 'error'))
+        selected = self.values[0]
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message(embed=status_embed('Server required', 'Run this option inside a server.', 'error'))
+        await self.cog.bot.db.set_config(guild.id, 'roles', self.key, selected.id)
+        await interaction.response.send_message(embed=status_embed('Setting saved', f'**{self.placeholder}**\n{selected.mention}', 'success'))
+
+
+class CreateResourcesConfirm(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    @discord.ui.button(label='Create missing resources', style=discord.ButtonStyle.danger, emoji='🔧')
+    async def create_resources(self, interaction, button):
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(embed=status_embed('Administrators only', 'You need **Manage Server** permission to change setup.', 'error'))
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message(embed=status_embed('Server required', 'Run this option inside a server.', 'error'))
+        if not guild.me.guild_permissions.manage_roles or not guild.me.guild_permissions.manage_channels:
+            return await interaction.response.send_message(embed=status_embed(
+                'Missing bot permissions',
+                'TowelBot needs **Manage Roles** and **Manage Channels**.',
+                'error',
+            ))
+        await interaction.response.defer(thinking=True)
+
+        role_specs = (
+            ('staff', 'Nation Staff', discord.Color.blurple()),
+            ('immigrant', 'Immigrant', discord.Color.orange()),
+            ('citizen', 'Citizen', discord.Color.green()),
+        )
+        for key, name, color in role_specs:
+            role = discord.utils.get(guild.roles, name=name)
+            if role is None:
+                role = await guild.create_role(name=name, color=color, hoist=True, reason='TowelBot confirmed setup')
+            await self.cog.bot.db.set_config(guild.id, 'roles', key, role.id)
+
+        community = discord.utils.get(guild.categories, name='🏛️・Community')
+        if community is None:
+            community = await guild.create_category('🏛️・Community', reason='TowelBot confirmed setup')
+
+        staff_category = discord.utils.get(guild.categories, name='🛡️・Administration')
+        if staff_category is None:
+            staff_category = await guild.create_category('🛡️・Administration', reason='TowelBot confirmed setup')
+
+        channel_specs = (
+            ('welcome', '👋・welcome', community),
+            ('announcement', '📢・announcements', community),
+            ('logging', '🧾・logs', staff_category),
+            ('application_review', '📋・application-review', staff_category),
+        )
+        for key, name, category in channel_specs:
+            channel = discord.utils.get(category.text_channels, name=name)
+            if channel is None:
+                channel = await guild.create_text_channel(name, category=category, reason='TowelBot confirmed setup')
+            await self.cog.bot.db.set_config(guild.id, 'channels', key, channel.id)
+
+        ticket_category = discord.utils.get(guild.categories, name='🎫・Tickets')
+        if ticket_category is None:
+            ticket_category = await guild.create_category('🎫・Tickets', reason='TowelBot confirmed setup')
+        await self.cog.bot.db.set_config(guild.id, 'channels', 'ticket_category', ticket_category.id)
+        await interaction.followup.send(embed=status_embed(
+            'Resources created',
+            'Missing TowelBot roles and channels were created.\nReview the role hierarchy and channel permissions after setup.',
+            'success',
+        ))
+
+
+class SetupDashboard(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=900)
+        self.cog = cog
+        for key, label in CHANNEL_KEYS:
+            self.add_item(ChannelSelect(cog, key, label))
+        self.add_item(RoleSelect(cog, 'staff', 'Staff'))
+        self.add_item(RoleSelect(cog, 'citizen', 'Citizen'))
+        self.add_item(RoleSelect(cog, 'immigrant', 'Immigrant'))
+
+    @discord.ui.button(label='Create missing resources', style=discord.ButtonStyle.primary, emoji='🔧')
+    async def confirm_creation(self, interaction, button):
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(embed=status_embed('Administrators only', 'You need **Manage Server** permission to change setup.', 'error'))
+        await interaction.response.send_message(
+            embed=status_embed(
+                'Confirm resource creation',
+                'TowelBot will create only missing resources with standard TowelBot names. Continue?',
+                'warning',
+            ),
+            view=CreateResourcesConfirm(self.cog),
+        )
 
 
 class Setup(commands.Cog):
-    """One-time general server setup. Border permissions are deliberately handled by /border setup."""
-
     def __init__(self, bot):
         self.bot = bot
 
-    async def ensure_role(self, guild, name, color):
-        found = discord.utils.get(guild.roles, name=name)
-        if found:
-            return found
-        return await guild.create_role(name=name, color=color, reason='TowelBot /setup')
-
-    async def ensure_category(self, guild, name, overwrites):
-        category = discord.utils.get(guild.categories, name=name)
-        if category is None:
-            return await guild.create_category(name, overwrites=overwrites, reason='TowelBot /setup')
-        await category.edit(overwrites=overwrites, reason='TowelBot /setup permission sync')
-        return category
-
-    async def ensure_text(self, guild, name, category, overwrites=None):
-        existing = discord.utils.get(category.text_channels, name=name)
-        if existing:
-            await existing.edit(overwrites=overwrites or category.overwrites, reason='TowelBot /setup')
-            return existing
-        return await guild.create_text_channel(name, category=category, overwrites=overwrites, reason='TowelBot /setup')
-
-    @app_commands.command(name='setup', description='Create or repair the standard TowelBot server structure.')
+    @app_commands.command(name='setup', description='Open the TowelBot setup dashboard.')
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def setup_server(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True)
+    async def setup_dashboard(self, interaction):
+        status = []
         guild = interaction.guild
-        me = guild.me
-        if not me or not me.guild_permissions.manage_channels or not me.guild_permissions.manage_roles:
-            return await interaction.followup.send(embed=embed('Setup failed', 'I need **Manage Channels** and **Manage Roles**. Also move my bot role above the roles I should manage.', 'error'))
+        if guild is None:
+            return await interaction.response.send_message(embed=status_embed('Server required', 'Run setup inside a server.', 'error'))
+        for key, label in CHANNEL_KEYS:
+            value = await self.bot.db.get_config(guild.id, 'channels', key)
+            status.append(f'{"✅" if value else "⚪"} {label}')
+        for key, label in (('staff', 'Staff role'), ('citizen', 'Citizen role'), ('immigrant', 'Immigrant role')):
+            value = await self.bot.db.get_config(guild.id, 'roles', key)
+            status.append(f'{"✅" if value else "⚪"} {label}')
 
-        try:
-            staff = await self.ensure_role(guild, 'Nation Staff', discord.Color.blurple())
-            muted = await self.ensure_role(guild, 'Muted', discord.Color.dark_grey())
-            jailed = await self.ensure_role(guild, 'Jailed', discord.Color.dark_red())
-            self.bot.config.setdefault('roles', {}).update({'staff': staff.id, 'border_officer': staff.id, 'muted': muted.id, 'jailed': jailed.id})
-
-            everyone = guild.default_role
-            staff_ow = {
-                everyone: discord.PermissionOverwrite(view_channel=False),
-                staff: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-                me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            }
-            public_ow = {
-                everyone: discord.PermissionOverwrite(view_channel=True, read_message_history=True),
-                me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True),
-            }
-            staff_cat = await self.ensure_category(guild, 'Administration', staff_ow)
-            community_cat = await self.ensure_category(guild, 'Community', public_ow)
-
-            channels = {
-                'welcome': await self.ensure_text(guild, '👋-welcome', community_cat, public_ow),
-                'announcement': await self.ensure_text(guild, '📢-announcements', community_cat, public_ow),
-                'mod_log': await self.ensure_text(guild, '🛡️-mod-log', staff_cat, staff_ow),
-                'automod_log': await self.ensure_text(guild, '🤖-automod-log', staff_cat, staff_ow),
-                'application_review': await self.ensure_text(guild, '📋-application-review', staff_cat, staff_ow),
-                'message_log': await self.ensure_text(guild, '💬-message-log', staff_cat, staff_ow),
-                'member_log': await self.ensure_text(guild, '👥-member-log', staff_cat, staff_ow),
-                'role_log': await self.ensure_text(guild, '🎭-role-log', staff_cat, staff_ow),
-                'ticket_log': await self.ensure_text(guild, '🎫-ticket-log', staff_cat, staff_ow),
-            }
-            self.bot.config.setdefault('channels', {}).update({key: value.id for key, value in channels.items()})
-            self.bot.config.setdefault('feature_toggles', {}).update({
-                'border': True, 'moderation': True, 'automod': True, 'elections': True,
-                'community': True, 'reaction_roles': True, 'reminders_polls': True,
-                'starboard': True, 'tickets': True, 'voice': True,
-                'announcements_stats': True, 'logging': True,
-            })
-            self.bot.config.setdefault('automod', {})['enabled'] = True
-            self.bot.config.setdefault('levels', {})['enabled'] = True
-            self.bot.save_config()
-            await audit(self.bot, guild, interaction.user, 'Full bot setup completed', details='General roles, categories, channels and feature toggles created. Run /border setup separately to configure immigrant/citizen access.')
-            await interaction.followup.send(embed=embed('TowelBot setup complete', 'Created or repaired the standard roles, community channels, administration channels and feature settings.\n\n**Next:** run `/border setup` to create the Immigrant/Citizen roles, lock every channel to immigrants, and configure your application questions.', 'success'))
-        except discord.Forbidden:
-            await interaction.followup.send(embed=embed('Setup failed', 'Discord denied a setup action. Check Manage Roles / Manage Channels and the bot role hierarchy.', 'error'))
-        except Exception:
-            logging.getLogger('nationbot.setup').exception('Setup failed')
-            await interaction.followup.send(embed=embed('Setup failed', 'An unexpected error occurred. Check bot.log for details.', 'error'))
+        dashboard = embed(
+            '🛠️ TowelBot Setup Dashboard',
+            'Choose existing resources below. TowelBot never creates resources unless you explicitly confirm it.',
+            'brand',
+        )
+        dashboard.add_field(name='Setup status', value='\n'.join(status) or 'No settings found', inline=False)
+        dashboard.add_field(name='Configuration', value='Use the dropdowns to assign channels and roles.', inline=False)
+        await interaction.response.send_message(
+            embed=dashboard,
+            view=SetupDashboard(self),
+        )
 
 
 async def setup(bot):

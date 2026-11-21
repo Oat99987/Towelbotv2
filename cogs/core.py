@@ -1,9 +1,36 @@
 import discord
 from discord.ext import commands
-from common import embed, admin, audit
+from common import embed, status_embed, admin, audit
 
 class Core(commands.Cog):
     def __init__(self, bot): self.bot = bot
+
+    @discord.app_commands.command(name="ping", description="Check TowelBot latency.")
+    async def ping_slash(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=status_embed("TowelBot is online", f"Gateway latency: **{round(self.bot.latency * 1000)} ms**","success"))
+
+    @discord.app_commands.command(name="botinfo", description="Show TowelBot information.")
+    async def botinfo(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=embed(
+            "TowelBot",
+            f"Servers: `{len(self.bot.guilds)}`\nLatency: `{round(self.bot.latency * 1000)} ms`\nLibrary: `discord.py`",
+        ))
+
+    @discord.app_commands.command(name="serverinfo", description="Show information about this server.")
+    @discord.app_commands.guild_only()
+    async def serverinfo(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Use this command inside a server.")
+        await interaction.response.send_message(embed=embed(
+            guild.name,
+            f"Members: `{guild.member_count}`\nRoles: `{len(guild.roles)}`\nChannels: `{len(guild.channels)}`",
+        ).set_thumbnail(url=guild.icon.url if guild.icon else None))
+
+    @discord.app_commands.command(name="avatar", description="View a member's Discord avatar.")
+    async def avatar(self, interaction: discord.Interaction, member: discord.Member | None = None):
+        target = member or interaction.user
+        await interaction.response.send_message(embed=embed(f"{target.display_name}'s avatar").set_image(url=target.display_avatar.url))
 
     @commands.hybrid_command(name="help", description="Show available command groups.")
     async def help(self, ctx):

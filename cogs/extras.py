@@ -16,7 +16,7 @@ class TicketPanel(discord.ui.View):
         category=guild.get_channel(category_id) if category_id else None
         channel=await guild.create_text_channel(f"ticket-{interaction.user.name}".lower()[:90],category=category,overwrites=overwrites)
         await channel.send(f"{interaction.user.mention} Support staff will be with you. Close this ticket when finished.")
-        await interaction.response.send_message(f"Ticket created: {channel.mention}",ephemeral=True)
+        await interaction.response.send_message(f"Ticket created: {channel.mention}")
 
 class Extras(commands.Cog):
     def __init__(self,bot): self.bot=bot

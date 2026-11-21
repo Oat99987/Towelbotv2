@@ -1,10 +1,26 @@
 import discord
 from discord.ext import commands
 from datetime import timedelta
-from common import embed, admin, audit, role
+from common import embed, status_embed, admin, audit, role
 
 class Moderation(commands.Cog):
     def __init__(self,bot): self.bot=bot
+
+    async def send_action(self, ctx, title, member, action, reason=None):
+        card=status_embed(title, f'**Member:** {member.mention if hasattr(member, "mention") else member}', 'success')
+        card.add_field(name='Action', value=action, inline=True)
+        if reason:
+            card.add_field(name='Reason', value=str(reason)[:1024], inline=False)
+        await ctx.send(embed=card)
+
+    async def send_discord_error(self, ctx, exc):
+        if isinstance(exc, discord.Forbidden):
+            card=status_embed('Action denied', 'Discord denied this moderation action. Check TowelBot permissions and role hierarchy.', 'error')
+        elif isinstance(exc, discord.HTTPException):
+            card=status_embed('Discord request failed', f'Discord returned `{exc.status}`: {exc.text[:500]}', 'error')
+        else:
+            card=status_embed('Unexpected error', 'The action could not be completed. Check bot.log for details.', 'error')
+        await ctx.send(embed=card)
 
     async def case(self,guild,user,actor,action,reason,expires=None):
         await self.bot.db.execute("INSERT INTO cases(guild_id,user_id,moderator_id,action,reason,expires_at) VALUES(?,?,?,?,?,?)",
@@ -14,34 +30,51 @@ class Moderation(commands.Cog):
     @commands.hybrid_command(name="ban",description="Ban a member.")
     @commands.has_permissions(ban_members=True)
     async def ban(self,ctx,member:discord.Member,*,reason="No reason supplied"):
-        await member.ban(reason=reason); await self.case(ctx.guild,member,ctx.author,"Ban",reason)
-        await ctx.send(embed=embed("Member banned",f"{member} — {reason}","success"))
+        try:
+            await member.ban(reason=reason)
+            await self.case(ctx.guild,member,ctx.author,"Ban",reason)
+            await self.send_action(ctx,'Member banned',member,'Ban',reason)
+        except discord.HTTPException as exc:
+            await self.send_discord_error(ctx,exc)
 
     @commands.hybrid_command(name="unban",description="Unban by user ID.")
     @commands.has_permissions(ban_members=True)
     async def unban(self,ctx,user_id:str,*,reason="No reason supplied"):
-        try: uid=int(user_id)
-        except ValueError: return await ctx.send(embed=embed("Command error","Provide a numeric user ID.","error"))
-        user=await self.bot.fetch_user(uid)
-        await ctx.guild.unban(user,reason=reason)
-        await self.case(ctx.guild,user,ctx.author,"Unban",reason)
-        await ctx.send(embed=embed("User unbanned",str(user),"success"))
+        try:
+            uid=int(user_id)
+        except ValueError:
+            return await ctx.send(embed=status_embed("Invalid user ID","Provide a numeric Discord user ID.","error"))
+        try:
+            user=await self.bot.fetch_user(uid)
+            await ctx.guild.unban(user,reason=reason)
+            await self.case(ctx.guild,user,ctx.author,"Unban",reason)
+            await self.send_action(ctx,'User unbanned',user,'Unban',reason)
+        except discord.HTTPException as exc:
+            await self.send_discord_error(ctx,exc)
 
     @commands.hybrid_command(name="kick",description="Kick a member.")
     @commands.has_permissions(kick_members=True)
     async def kick(self,ctx,member:discord.Member,*,reason="No reason supplied"):
-        await member.kick(reason=reason); await self.case(ctx.guild,member,ctx.author,"Kick",reason)
-        await ctx.send(embed=embed("Member kicked",f"{member} — {reason}","success"))
+        try:
+            await member.kick(reason=reason)
+            await self.case(ctx.guild,member,ctx.author,"Kick",reason)
+            await self.send_action(ctx,'Member kicked',member,'Kick',reason)
+        except discord.HTTPException as exc:
+            await self.send_discord_error(ctx,exc)
 
     @commands.hybrid_command(name="timeout",description="Timeout a member for a number of minutes.")
     @commands.has_permissions(moderate_members=True)
     async def timeout(self,ctx,member:discord.Member,minutes:int,*,reason="No reason supplied"):
-        if not 1<=minutes<=40320: return await ctx.send(embed=embed("Command error","Minutes must be 1–40320.","error"))
-        until=discord.utils.utcnow()+timedelta(minutes=minutes)
-        await member.timeout(timedelta(minutes=minutes),reason=reason)
-        await self.case(ctx.guild,member,ctx.author,"Timeout",reason,int(until.timestamp()))
-        await self.bot.db.execute("INSERT INTO temp_actions(guild_id,user_id,action,expires_at) VALUES(?,?,?,?)",(ctx.guild.id,member.id,"untimeout",int(until.timestamp())))
-        await ctx.send(embed=embed("Timeout applied",f"{member} for {minutes} minutes.","success"))
+        if not 1<=minutes<=40320:
+            return await ctx.send(embed=status_embed("Invalid timeout","Choose a duration from **1 to 40320 minutes**.","error"))
+        try:
+            until=discord.utils.utcnow()+timedelta(minutes=minutes)
+            await member.timeout(timedelta(minutes=minutes),reason=reason)
+            await self.case(ctx.guild,member,ctx.author,"Timeout",reason,int(until.timestamp()))
+            await self.bot.db.execute("INSERT INTO temp_actions(guild_id,user_id,action,expires_at) VALUES(?,?,?,?)",(ctx.guild.id,member.id,"untimeout",int(until.timestamp())))
+            await self.send_action(ctx,f'Member timed out for {minutes} minutes',member,'Timeout',reason)
+        except discord.HTTPException as exc:
+            await self.send_discord_error(ctx,exc)
 
     @commands.hybrid_command(name="untimeout",description="Remove a member timeout.")
     @commands.has_permissions(moderate_members=True)
@@ -59,21 +92,25 @@ class Moderation(commands.Cog):
         if threshold and mins and row["n"]>=threshold:
             await member.timeout(timedelta(minutes=mins),reason="Warning escalation")
             await self.case(ctx.guild,member,ctx.author,"Warning escalation",f"{row['n']} warnings; {mins} minute timeout")
-        await ctx.send(embed=embed("Warning recorded",f"{member}: {reason}","warning"))
+        card=status_embed("Warning recorded",f"**Member:** {member.mention}", "warning")
+        card.add_field(name="Reason", value=reason[:1024], inline=False)
+        await ctx.send(embed=card)
 
     @commands.hybrid_command(name="cases",description="View member moderation history.")
     @commands.has_permissions(moderate_members=True)
     async def cases(self,ctx,member:discord.Member):
         rows=await self.bot.db.fetchall("SELECT id,action,reason,created_at FROM cases WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 15",(ctx.guild.id,member.id))
         desc="\n".join(f"**#{r['id']} {r['action']}** — {r['reason'] or 'No reason'} ({r['created_at']})" for r in rows) or "No cases."
-        await ctx.send(embed=embed(f"Cases: {member}",desc))
+        card=embed(f"📋 Moderation history • {member.display_name}",desc,"info")
+        card.set_thumbnail(url=member.display_avatar.url)
+        await ctx.send(embed=card)
 
     @commands.hybrid_command(name="purge",description="Delete up to 100 recent messages.")
     @commands.has_permissions(manage_messages=True)
     async def purge(self,ctx,amount:int):
         amount=max(1,min(amount,100)); deleted=await ctx.channel.purge(limit=amount+1)
         await audit(self.bot,ctx.guild,ctx.author,"Purge",ctx.channel,f"{len(deleted)-1} messages")
-        await ctx.send(embed=embed("Messages deleted",str(len(deleted)-1),"success"),delete_after=5)
+        await ctx.send(embed=status_embed("Messages deleted",f"Removed **{len(deleted)-1}** recent messages.","success"),delete_after=5)
 
     @commands.hybrid_command(name="slowmode",description="Set channel slowmode in seconds.")
     @commands.has_permissions(manage_channels=True)
@@ -117,9 +154,10 @@ class Moderation(commands.Cog):
 
     @commands.hybrid_command(name="nickname",description="Change a member nickname.")
     @commands.has_permissions(manage_nicknames=True)
-    async def nickname(self,ctx,member:discord.Member,*,name:str=None):
-        await member.edit(nick=name,reason=f"Changed by {ctx.author}")
-        await self.case(ctx.guild,member,ctx.author,"Nickname",f"New nickname: {name}")
+    async def nickname(self,ctx,member:discord.Member,*,name:str|None=None):
+        nickname = name if name is not None else None
+        await member.edit(nick=nickname,reason=f"Changed by {ctx.author}")
+        await self.case(ctx.guild,member,ctx.author,"Nickname",f"New nickname: {nickname or 'None'}")
         await ctx.send(embed=embed("Nickname updated",str(member),"success"))
 
     @commands.hybrid_command(name="role-add",description="Add a role to a member.")

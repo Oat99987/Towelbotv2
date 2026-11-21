@@ -6,6 +6,32 @@ from common import embed, admin, channel, audit
 
 class Community(commands.Cog):
     def __init__(self,bot): self.bot=bot
+
+    @discord.app_commands.command(name="rank", description="View XP and level for a member.")
+    async def rank_slash(self, interaction: discord.Interaction, member: discord.Member | None = None):
+        target = member or interaction.user
+        row = await self.bot.db.fetchone(
+            "SELECT xp,level FROM xp WHERE guild_id=? AND user_id=?",
+            (interaction.guild_id, target.id),
+        )
+        xp = row["xp"] if row else 0
+        level = row["level"] if row else 0
+        card = embed(f"{target.display_name}'s rank")
+        card.set_thumbnail(url=target.display_avatar.url)
+        card.add_field(name="Level", value=str(level), inline=True)
+        card.add_field(name="XP", value=str(xp), inline=True)
+        await interaction.response.send_message(embed=card)
+
+    @discord.app_commands.command(name="leaderboard", description="View the server XP leaderboard.")
+    async def leaderboard_slash(self, interaction: discord.Interaction):
+        rows = await self.bot.db.fetchall(
+            "SELECT user_id,xp,level FROM xp WHERE guild_id=? ORDER BY xp DESC,level DESC LIMIT 10",
+            (interaction.guild_id,),
+        )
+        lines = []
+        for index, row in enumerate(rows, 1):
+            lines.append(f"`{index}.` <@{row['user_id']}> — Level {row['level']} · {row['xp']} XP")
+        await interaction.response.send_message(embed=embed("TowelBot leaderboard", "\n".join(lines) or "No XP records yet."))
     @commands.hybrid_command(name="welcome-set",description="Configure welcome message and channel.")
     @admin()
     async def welcome_set(self,ctx,target:discord.TextChannel,*,message):
@@ -42,7 +68,7 @@ class Community(commands.Cog):
             row=await self.bot.db.fetchone("SELECT response FROM custom_commands WHERE guild_id=? AND name=?",(message.guild.id,name))
             if row: await message.channel.send(row["response"].replace("{member}",message.author.mention).replace("{server}",message.guild.name))
     @commands.hybrid_command(name="level",description="View member level.")
-    async def level(self,ctx,member:discord.Member=None):
+    async def level(self,ctx,member:discord.Member|None=None):
         member=member or ctx.author
         row=await self.bot.db.fetchone("SELECT xp,level FROM xp WHERE guild_id=? AND user_id=?",(ctx.guild.id,member.id))
         await ctx.send(embed=embed(f"Level: {member}",f"Level `{row['level'] if row else 0}` · XP `{row['xp'] if row else 0}`"))

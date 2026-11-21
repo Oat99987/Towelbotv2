@@ -7,14 +7,18 @@ class RoleButton(discord.ui.Button):
         super().__init__(label=label[:80],style=discord.ButtonStyle.secondary,custom_id=f"nation:rr:{role_id}")
         self.role_id=role_id
     async def callback(self,interaction):
+        if interaction.guild is None:
+            return await interaction.response.send_message("Use this role button inside the server.")
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Use this role button inside the server.")
         r=interaction.guild.get_role(self.role_id)
-        if not r: return await interaction.response.send_message("That role no longer exists.",ephemeral=True)
+        if not r: return await interaction.response.send_message("That role no longer exists.")
         if r in interaction.user.roles:
             await interaction.user.remove_roles(r,reason="Self-assign role panel")
-            await interaction.response.send_message(f"Removed {r.name}.",ephemeral=True)
+            await interaction.response.send_message(f"Removed {r.name}.")
         else:
             await interaction.user.add_roles(r,reason="Self-assign role panel")
-            await interaction.response.send_message(f"Added {r.name}.",ephemeral=True)
+            await interaction.response.send_message(f"Added {r.name}.")
 
 class ReactionRoles(commands.Cog):
     def __init__(self,bot): self.bot=bot

@@ -10,7 +10,7 @@ class TicketView(discord.ui.View):
         existing=await self.bot.db.fetchone("SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open'",(guild.id,interaction.user.id))
         if existing:
             ch=guild.get_channel(existing["channel_id"])
-            return await interaction.response.send_message(f"You already have a ticket: {ch.mention if ch else 'channel unavailable'}",ephemeral=True)
+            return await interaction.response.send_message(f"You already have a ticket: {ch.mention if ch else 'channel unavailable'}")
         overwrites={guild.default_role:discord.PermissionOverwrite(view_channel=False),
                     interaction.user:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)}
         staff=role(guild,self.bot,"staff")
@@ -20,18 +20,18 @@ class TicketView(discord.ui.View):
         ch=await guild.create_text_channel(f"ticket-{interaction.user.id}",category=category,overwrites=overwrites)
         cur=await self.bot.db.execute("INSERT INTO tickets(guild_id,channel_id,user_id) VALUES(?,?,?)",(guild.id,ch.id,interaction.user.id))
         await ch.send(embed=embed("Support ticket",f"{interaction.user.mention} Staff will assist you."),view=TicketCloseView(self.bot,cur.lastrowid))
-        await interaction.response.send_message(f"Ticket opened: {ch.mention}",ephemeral=True)
+        await interaction.response.send_message(f"Ticket opened: {ch.mention}")
 
 class TicketCloseView(discord.ui.View):
     def __init__(self,bot,ticket_id): super().__init__(timeout=None); self.bot=bot; self.ticket_id=ticket_id
     @discord.ui.button(label="Close ticket",style=discord.ButtonStyle.danger,custom_id="nation:tickets:close")
     async def close(self,interaction,button):
         row=await self.bot.db.fetchone("SELECT * FROM tickets WHERE id=? AND status='open'",(self.ticket_id,))
-        if not row: return await interaction.response.send_message("Ticket already closed.",ephemeral=True)
+        if not row: return await interaction.response.send_message("Ticket already closed.")
         staff=role(interaction.guild,self.bot,"staff")
         if interaction.user.id!=row["user_id"] and not interaction.user.guild_permissions.manage_channels and not (staff and staff in interaction.user.roles):
-            return await interaction.response.send_message("Only the opener or staff can close this ticket.",ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
+            return await interaction.response.send_message("Only the opener or staff can close this ticket.")
+        await interaction.response.defer()
         lines=[]
         async for m in interaction.channel.history(limit=500,oldest_first=True):
             lines.append(f"[{m.created_at.isoformat()}] {m.author}: {m.content}")
@@ -44,7 +44,7 @@ class TicketCloseView(discord.ui.View):
         await self.bot.db.execute("UPDATE tickets SET status='closed',closed_at=CURRENT_TIMESTAMP WHERE id=?",(self.ticket_id,))
         await audit(self.bot,interaction.guild,interaction.user,"Ticket closed",interaction.channel,str(self.ticket_id))
         await interaction.channel.delete(reason=f"Ticket closed by {interaction.user}")
-        await interaction.followup.send("Ticket closed.",ephemeral=True)
+        await interaction.followup.send("Ticket closed.")
 
 class Tickets(commands.Cog):
     def __init__(self,bot): self.bot=bot
