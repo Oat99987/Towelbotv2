@@ -35,6 +35,18 @@ def role(guild, bot, key):
     return guild.get_role(role_id) if role_id else None
 
 
+async def configured_role(guild, bot, key):
+    role_id = await bot.db.get_config(guild.id, 'roles', key)
+    if role_id:
+        try:
+            configured = guild.get_role(int(role_id))
+        except (TypeError, ValueError):
+            configured = None
+        if configured is not None:
+            return configured
+    return role(guild, bot, key)
+
+
 def channel(guild, bot, key):
     channel_id = cfg_id(bot, 'channels', key)
     return guild.get_channel(channel_id) if channel_id else None
@@ -59,7 +71,7 @@ def admin():
 
 def staff_only():
     async def predicate(ctx):
-        configured = role(ctx.guild, ctx.bot, 'staff')
+        configured = await configured_role(ctx.guild, ctx.bot, 'staff') if ctx.guild else None
         return bool(
             ctx.author.guild_permissions.administrator
             or ctx.author.guild_permissions.manage_guild
@@ -79,7 +91,7 @@ def configured_id(bot, section, key):
 
 def staff_role_check(bot):
     async def predicate(ctx):
-        configured = role(ctx.guild, bot, 'staff')
+        configured = await configured_role(ctx.guild, bot, 'staff') if ctx.guild else None
         return ctx.author.guild_permissions.administrator or bool(configured and configured in ctx.author.roles)
     from discord.ext import commands
     return commands.check(predicate)

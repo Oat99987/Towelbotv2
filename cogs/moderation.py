@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from datetime import timedelta
-from common import embed, status_embed, admin, audit, role
+from common import embed, status_embed, admin, audit, configured_role
 
 class Moderation(commands.Cog):
     def __init__(self,bot): self.bot=bot
@@ -96,6 +96,30 @@ class Moderation(commands.Cog):
         card.add_field(name="Reason", value=reason[:1024], inline=False)
         await ctx.send(embed=card)
 
+    @commands.hybrid_command(name="warnings",description="View a member's warning history.")
+    @commands.has_permissions(moderate_members=True)
+    async def warnings(self,ctx,member:discord.Member):
+        rows=await self.bot.db.fetchall(
+            "SELECT id,reason,created_at FROM cases WHERE guild_id=? AND user_id=? AND action='Warning' ORDER BY id DESC LIMIT 15",
+            (ctx.guild.id,member.id),
+        )
+        details="\n".join(
+            f"**#{row['id']}** — {row['reason'] or 'No reason'} · {row['created_at']}"
+            for row in rows
+        ) or "No warnings recorded."
+        card=embed(f"Warnings • {member.display_name}",details,"warning")
+        card.set_thumbnail(url=member.display_avatar.url)
+        await ctx.send(embed=card)
+
+    @commands.hybrid_command(name="note",description="Add a private moderation note to a member's case history.")
+    @commands.has_permissions(moderate_members=True)
+    async def note(self,ctx,member:discord.Member,*,details:str):
+        details=details.strip()
+        if not details or len(details)>1000:
+            return await ctx.send(embed=status_embed("Invalid note","A note must contain 1–1,000 characters.","error"))
+        await self.case(ctx.guild,member,ctx.author,"Moderator note",details)
+        await ctx.send(embed=status_embed("Moderation note saved",f"Added a note to {member.mention}'s case history."))
+
     @commands.hybrid_command(name="cases",description="View member moderation history.")
     @commands.has_permissions(moderate_members=True)
     async def cases(self,ctx,member:discord.Member):
@@ -177,16 +201,16 @@ class Moderation(commands.Cog):
     @commands.hybrid_command(name="hardmute",description="Apply configured muted role.")
     @commands.has_permissions(manage_roles=True)
     async def hardmute(self,ctx,member:discord.Member,*,reason="No reason supplied"):
-        muted=role(ctx.guild,self.bot,"muted")
-        if not muted: return await ctx.send(embed=embed("Command error","Configure roles.muted first.","error"))
+        muted=await configured_role(ctx.guild,self.bot,"muted")
+        if not muted: return await ctx.send(embed=status_embed("Muted role not configured","Choose a **Muted** role in `/setup` → **Configure roles** before using hardmute.","error"))
         await member.add_roles(muted,reason=reason); await self.case(ctx.guild,member,ctx.author,"Hardmute",reason)
         await ctx.send(embed=embed("Hardmute applied",str(member),"success"))
 
     @commands.hybrid_command(name="unhardmute",description="Remove configured muted role.")
     @commands.has_permissions(manage_roles=True)
     async def unhardmute(self,ctx,member:discord.Member):
-        muted=role(ctx.guild,self.bot,"muted")
-        if not muted: return await ctx.send(embed=embed("Command error","Configure roles.muted first.","error"))
+        muted=await configured_role(ctx.guild,self.bot,"muted")
+        if not muted: return await ctx.send(embed=status_embed("Muted role not configured","Choose a **Muted** role in `/setup` → **Configure roles** before using unhardmute.","error"))
         await member.remove_roles(muted,reason=f"Released by {ctx.author}")
         await self.case(ctx.guild,member,ctx.author,"Unhardmute","Muted role removed")
         await ctx.send(embed=embed("Hardmute removed",str(member),"success"))
@@ -194,16 +218,16 @@ class Moderation(commands.Cog):
     @commands.hybrid_command(name="jail",description="Move a member into the configured jail role.")
     @commands.has_permissions(manage_roles=True)
     async def jail(self,ctx,member:discord.Member,*,reason="No reason supplied"):
-        jailed=role(ctx.guild,self.bot,"jailed")
-        if not jailed: return await ctx.send(embed=embed("Command error","Configure roles.jailed first.","error"))
+        jailed=await configured_role(ctx.guild,self.bot,"jailed")
+        if not jailed: return await ctx.send(embed=status_embed("Jailed role not configured","Choose a **Jailed** role in `/setup` → **Configure roles** before using jail.","error"))
         await member.add_roles(jailed,reason=reason); await self.case(ctx.guild,member,ctx.author,"Jail",reason)
         await ctx.send(embed=embed("Member jailed",str(member),"warning"))
 
     @commands.hybrid_command(name="release",description="Explicitly release a jailed member.")
     @commands.has_permissions(manage_roles=True)
     async def release(self,ctx,member:discord.Member):
-        jailed=role(ctx.guild,self.bot,"jailed")
-        if not jailed: return await ctx.send(embed=embed("Command error","Configure roles.jailed first.","error"))
+        jailed=await configured_role(ctx.guild,self.bot,"jailed")
+        if not jailed: return await ctx.send(embed=status_embed("Jailed role not configured","Choose a **Jailed** role in `/setup` → **Configure roles** before using release.","error"))
         await member.remove_roles(jailed,reason=f"Released by {ctx.author}")
         await self.case(ctx.guild,member,ctx.author,"Jail release","Explicit release")
         await ctx.send(embed=embed("Member released",str(member),"success"))

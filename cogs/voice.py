@@ -7,16 +7,15 @@ class TempVoice(commands.Cog):
     @commands.hybrid_command(name="voice-lobby-set",description="Set the temporary voice lobby.")
     @admin()
     async def set_lobby(self,ctx,channel:discord.VoiceChannel):
-        self.bot.config.setdefault("channels",{})["voice_lobby"]=channel.id
-        import json
-        from pathlib import Path
-        (Path(__file__).resolve().parents[1]/"config.json").write_text(json.dumps(self.bot.config,indent=2),encoding="utf-8")
+        await self.bot.db.set_config(ctx.guild.id, "channels", "voice_lobby", channel.id)
         await audit(self.bot,ctx.guild,ctx.author,"Temporary voice lobby configured",channel)
         await ctx.send(f"Temporary voice lobby set to {channel.mention}.")
     @commands.Cog.listener()
     async def on_voice_state_update(self,member,before,after):
-        lobby=self.bot.config.get("channels",{}).get("voice_lobby")
-        if after.channel and lobby and after.channel.id==int(lobby):
+        lobby = await self.bot.db.get_config(member.guild.id, "channels", "voice_lobby")
+        if lobby is None:
+            lobby = self.bot.config.get("channels", {}).get("voice_lobby")
+        if after.channel and lobby and after.channel.id == int(lobby):
             ch=await member.guild.create_voice_channel(f"{member.display_name}'s room",category=after.channel.category)
             await ch.set_permissions(member,connect=True,manage_channels=True)
             await member.move_to(ch)

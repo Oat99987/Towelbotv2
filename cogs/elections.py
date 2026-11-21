@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from common import embed, admin, role, audit
+from common import embed, admin, configured_role, audit
 
 class VoteView(discord.ui.View):
     def __init__(self,cog,election_id,candidates):
@@ -10,7 +10,7 @@ class VoteView(discord.ui.View):
             button.callback=self.callback_for(cid); self.add_item(button)
     def callback_for(self,candidate_id):
         async def callback(interaction):
-            citizen=role(interaction.guild,self.cog.bot,"citizen")
+            citizen=await configured_role(interaction.guild,self.cog.bot,"citizen")
             if not citizen or citizen not in interaction.user.roles:
                 return await interaction.response.send_message("Only citizens may vote.")
             election=await self.cog.bot.db.fetchone("SELECT status FROM elections WHERE id=?",(self.election_id,))

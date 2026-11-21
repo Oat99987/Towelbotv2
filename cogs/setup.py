@@ -11,14 +11,34 @@ CHANNEL_KEYS = (
     ('logging', 'Unified logging'),
     ('application_review', 'Application review'),
     ('ticket_category', 'Ticket category'),
+    ('voice_lobby', 'Temporary voice lobby'),
 )
+
+
+CHANNEL_TYPES_BY_KEY = {
+    'welcome': (discord.ChannelType.text, discord.ChannelType.news),
+    'announcement': (discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.forum),
+    'logging': (discord.ChannelType.text, discord.ChannelType.news),
+    'application_review': (discord.ChannelType.text, discord.ChannelType.news),
+    'ticket_category': (discord.ChannelType.category,),
+    'voice_lobby': (discord.ChannelType.voice, discord.ChannelType.stage_voice),
+}
+PRIMARY_CHANNEL_KEYS = CHANNEL_KEYS[:4]
+ADDITIONAL_CHANNEL_KEYS = CHANNEL_KEYS[4:]
+
+
+def is_supported_channel_selection(selected, guild_id, key):
+    return (
+        selected.guild_id == guild_id
+        and selected.type in CHANNEL_TYPES_BY_KEY[key]
+    )
 
 
 class ChannelSelect(discord.ui.ChannelSelect):
     def __init__(self, cog, key, label):
         super().__init__(
             placeholder=f'Select {label.lower()} channel',
-            channel_types=[discord.ChannelType.text, discord.ChannelType.category],
+            channel_types=CHANNEL_TYPES_BY_KEY[key],
             min_values=1,
             max_values=1,
         )
@@ -28,14 +48,14 @@ class ChannelSelect(discord.ui.ChannelSelect):
         if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
             return await interaction.response.send_message(embed=status_embed('Administrators only', 'You need **Manage Server** permission to change setup.', 'error'))
         selected = self.values[0]
-        if not isinstance(selected, (discord.TextChannel, discord.CategoryChannel)):
-            return await interaction.response.send_message(embed=status_embed('Invalid selection', 'Please select a text channel or category.', 'error'))
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message(embed=status_embed('Server required', 'Run this option inside a server.', 'error'))
+        if not is_supported_channel_selection(selected, guild.id, self.key):
+            return await interaction.response.send_message(embed=status_embed('Invalid channel type', f'The selected channel type cannot be used for **{self.placeholder}**.', 'error'))
         await self.cog.bot.db.set_config(guild.id, 'channels', self.key, selected.id)
         await interaction.response.send_message(
-            embed=status_embed('Setting saved', f'**{self.placeholder}**\n{selected.mention}', 'success')
+            embed=status_embed('Setting saved', f'**{self.placeholder}**\n<#{selected.id}>', 'success')
         )
 
 
@@ -79,6 +99,8 @@ class CreateResourcesConfirm(discord.ui.View):
             ('staff', 'Nation Staff', discord.Color.blurple()),
             ('immigrant', 'Immigrant', discord.Color.orange()),
             ('citizen', 'Citizen', discord.Color.green()),
+            ('muted', 'Muted', discord.Color.dark_grey()),
+            ('jailed', 'Jailed', discord.Color.dark_red()),
         )
         for key, name, color in role_specs:
             role = discord.utils.get(guild.roles, name=name)
@@ -157,14 +179,37 @@ class SetupDashboard(discord.ui.View):
 class ChannelSettingsView(discord.ui.View):
     def __init__(self, cog):
         super().__init__(timeout=900)
-        for key, label in CHANNEL_KEYS:
+        self.cog = cog
+        for key, label in PRIMARY_CHANNEL_KEYS:
+            self.add_item(ChannelSelect(cog, key, label))
+
+    @discord.ui.button(label='More channel settings', style=discord.ButtonStyle.secondary, emoji='⚙️')
+    async def additional_channels(self, interaction, button):
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(embed=status_embed('Administrators only', 'You need **Manage Server** permission to change setup.', 'error'))
+        await interaction.response.send_message(
+            embed=embed('⚙️ Additional channel settings', 'Configure ticket categories and voice lobbies.', 'brand'),
+            view=AdditionalChannelSettingsView(self.cog),
+        )
+
+
+class AdditionalChannelSettingsView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=900)
+        for key, label in ADDITIONAL_CHANNEL_KEYS:
             self.add_item(ChannelSelect(cog, key, label))
 
 
 class RoleSettingsView(discord.ui.View):
     def __init__(self, cog):
         super().__init__(timeout=900)
-        for key, label in (('staff', 'Staff'), ('citizen', 'Citizen'), ('immigrant', 'Immigrant')):
+        for key, label in (
+            ('staff', 'Staff'),
+            ('citizen', 'Citizen'),
+            ('immigrant', 'Immigrant'),
+            ('muted', 'Muted'),
+            ('jailed', 'Jailed'),
+        ):
             self.add_item(RoleSelect(cog, key, label))
 
 
@@ -183,7 +228,13 @@ class Setup(commands.Cog):
         for key, label in CHANNEL_KEYS:
             value = await self.bot.db.get_config(guild.id, 'channels', key)
             status.append(f'{"✅" if value else "⚪"} {label}')
-        for key, label in (('staff', 'Staff role'), ('citizen', 'Citizen role'), ('immigrant', 'Immigrant role')):
+        for key, label in (
+            ('staff', 'Staff role'),
+            ('citizen', 'Citizen role'),
+            ('immigrant', 'Immigrant role'),
+            ('muted', 'Muted role'),
+            ('jailed', 'Jailed role'),
+        ):
             value = await self.bot.db.get_config(guild.id, 'roles', key)
             status.append(f'{"✅" if value else "⚪"} {label}')
 

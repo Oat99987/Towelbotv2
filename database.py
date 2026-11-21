@@ -1,10 +1,14 @@
 import aiosqlite
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 SCHEMA = '''
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, actor_id INTEGER, target_id INTEGER, action TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, moderator_id INTEGER NOT NULL, action TEXT NOT NULL, reason TEXT, expires_at INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS police_records (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, subject_id INTEGER NOT NULL, officer_id INTEGER NOT NULL, action TEXT NOT NULL CHECK(action IN ('report','citation','arrest','release','warrant','warrant_clear')), status TEXT NOT NULL DEFAULT 'recorded' CHECK(status IN ('recorded','active','cleared')), details TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_police_records_subject ON police_records(guild_id,subject_id,id DESC);
 CREATE TABLE IF NOT EXISTS border_questions (guild_id INTEGER NOT NULL, position INTEGER NOT NULL, label TEXT NOT NULL, required INTEGER NOT NULL, max_length INTEGER NOT NULL, PRIMARY KEY(guild_id,position));
 CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answers TEXT NOT NULL, reviewer_id INTEGER, reason TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, reviewed_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_applications_pending ON applications(guild_id,user_id,status);
@@ -41,46 +45,257 @@ CREATE TABLE IF NOT EXISTS achievements (guild_id INTEGER NOT NULL, user_id INTE
 CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, title TEXT NOT NULL, message TEXT NOT NULL, channel_id INTEGER, role_id INTEGER, status TEXT NOT NULL DEFAULT 'draft', scheduled_at INTEGER, published_at TEXT, author_id INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS logging_config (guild_id INTEGER PRIMARY KEY, channel_id INTEGER, enabled INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS warnings (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, moderator_id INTEGER NOT NULL, reason TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS economy_settings (
+    guild_id INTEGER PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1))
+);
+CREATE TABLE IF NOT EXISTS economy_policies (
+    guild_id INTEGER NOT NULL,
+    policy TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_by INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(guild_id,policy)
+);
+CREATE TABLE IF NOT EXISTS economy_roles (
+    guild_id INTEGER PRIMARY KEY,
+    central_bank_role_id INTEGER NOT NULL,
+    treasury_role_id INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS economy_business_licenses (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+    issued_by INTEGER NOT NULL,
+    issued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_by INTEGER,
+    revoked_at TEXT,
+    reason TEXT,
+    PRIMARY KEY(guild_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS economy_accounts (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    wallet INTEGER NOT NULL DEFAULT 0 CHECK(wallet >= 0),
+    bank INTEGER NOT NULL DEFAULT 0 CHECK(bank >= 0),
+    last_work INTEGER NOT NULL DEFAULT 0,
+    last_daily INTEGER NOT NULL DEFAULT 0,
+    bank_last_interest INTEGER NOT NULL DEFAULT 0,
+    bank_interest_remainder INTEGER NOT NULL DEFAULT 0 CHECK(bank_interest_remainder >= 0),
+    PRIMARY KEY(guild_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS economy_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    entry_type TEXT NOT NULL,
+    wallet_delta INTEGER NOT NULL DEFAULT 0,
+    bank_delta INTEGER NOT NULL DEFAULT 0,
+    details TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_economy_ledger_user ON economy_ledger(guild_id,user_id,id DESC);
+CREATE TABLE IF NOT EXISTS economy_treasury (
+    guild_id INTEGER PRIMARY KEY,
+    balance INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS economy_assets (
+    guild_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('stock','forex')),
+    price INTEGER NOT NULL CHECK(price > 0),
+    volatility_bps INTEGER NOT NULL DEFAULT 0 CHECK(volatility_bps BETWEEN 0 AND 5000),
+    quote_day TEXT NOT NULL,
+    company_id INTEGER,
+    PRIMARY KEY(guild_id,symbol)
+);
+CREATE TABLE IF NOT EXISTS economy_price_history (
+    guild_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    quote_day TEXT NOT NULL,
+    price INTEGER NOT NULL CHECK(price > 0),
+    PRIMARY KEY(guild_id,symbol,quote_day),
+    FOREIGN KEY(guild_id,symbol) REFERENCES economy_assets(guild_id,symbol)
+);
+CREATE TABLE IF NOT EXISTS economy_holdings (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    quantity_milli INTEGER NOT NULL CHECK(quantity_milli > 0),
+    average_cost INTEGER NOT NULL CHECK(average_cost >= 0),
+    PRIMARY KEY(guild_id,user_id,symbol),
+    FOREIGN KEY(guild_id,symbol) REFERENCES economy_assets(guild_id,symbol)
+);
+CREATE TABLE IF NOT EXISTS economy_bonds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    offering_id INTEGER,
+    units INTEGER NOT NULL DEFAULT 1 CHECK(units > 0),
+    principal INTEGER NOT NULL CHECK(principal > 0),
+    yield_bps INTEGER NOT NULL CHECK(yield_bps >= 0),
+    term_days INTEGER NOT NULL CHECK(term_days > 0),
+    purchased_at INTEGER NOT NULL,
+    matures_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','redeemed'))
+);
+CREATE INDEX IF NOT EXISTS idx_economy_bonds_due ON economy_bonds(guild_id,user_id,status,matures_at);
+CREATE TABLE IF NOT EXISTS economy_bond_offerings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    face_value INTEGER NOT NULL CHECK(face_value > 0),
+    yield_bps INTEGER NOT NULL CHECK(yield_bps >= 0),
+    term_days INTEGER NOT NULL CHECK(term_days > 0),
+    units_total INTEGER NOT NULL CHECK(units_total > 0),
+    units_sold INTEGER NOT NULL DEFAULT 0 CHECK(units_sold >= 0),
+    issuer_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(guild_id,name)
+);
+CREATE TABLE IF NOT EXISTS economy_companies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    owner_id INTEGER NOT NULL,
+    treasury INTEGER NOT NULL DEFAULT 0 CHECK(treasury >= 0),
+    shares_total INTEGER NOT NULL CHECK(shares_total > 0),
+    last_payroll INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(guild_id,name),
+    UNIQUE(guild_id,symbol),
+    FOREIGN KEY(guild_id,symbol) REFERENCES economy_assets(guild_id,symbol)
+);
+CREATE TABLE IF NOT EXISTS economy_company_members (
+    company_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    salary INTEGER NOT NULL DEFAULT 0 CHECK(salary >= 0),
+    PRIMARY KEY(company_id,user_id),
+    FOREIGN KEY(company_id) REFERENCES economy_companies(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS economy_loans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    principal INTEGER NOT NULL CHECK(principal > 0),
+    balance INTEGER NOT NULL CHECK(balance >= 0),
+    rate_bps INTEGER NOT NULL CHECK(rate_bps >= 0),
+    issued_at INTEGER NOT NULL,
+    due_at INTEGER NOT NULL,
+    interest_remainder INTEGER NOT NULL DEFAULT 0 CHECK(interest_remainder >= 0),
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','repaid'))
+);
+CREATE INDEX IF NOT EXISTS idx_economy_loans_user ON economy_loans(guild_id,user_id,status);
 '''
 
 
 class Database:
     def __init__(self, path):
         self.path = Path(path)
-        self.conn = None
+        self.conn: aiosqlite.Connection | None = None
+        self._lock = asyncio.Lock()
 
     async def connect(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = await aiosqlite.connect(self.path)
-        self.conn.row_factory = aiosqlite.Row
-        await self.conn.execute('PRAGMA journal_mode=WAL')
-        await self.conn.execute('PRAGMA busy_timeout=5000')
-        await self.conn.executescript(SCHEMA)
-        await self.conn.commit()
+        async with self._lock:
+            if self.conn is not None:
+                raise RuntimeError('Database is already connected')
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            conn = await aiosqlite.connect(self.path)
+            try:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute('PRAGMA journal_mode=WAL')
+                await conn.execute('PRAGMA busy_timeout=5000')
+                await conn.executescript(SCHEMA)
+                await self._migrate_economy_schema(conn)
+                await conn.commit()
+            except BaseException:
+                await conn.close()
+                raise
+            self.conn = conn
+
+    async def _migrate_economy_schema(self, conn):
+        async with conn.execute('PRAGMA table_info(economy_bonds)') as cursor:
+            columns = {row['name'] for row in await cursor.fetchall()}
+        if 'offering_id' not in columns:
+            await conn.execute('ALTER TABLE economy_bonds ADD COLUMN offering_id INTEGER')
+        if 'units' not in columns:
+            await conn.execute(
+                'ALTER TABLE economy_bonds ADD COLUMN units INTEGER NOT NULL DEFAULT 1'
+            )
+
+        legacy_symbols = ('TWL', 'ORB', 'SYN', 'USD', 'EUR', 'GBP', 'JPY')
+        placeholders = ','.join('?' for _ in legacy_symbols)
+        await conn.execute(
+            f'''DELETE FROM economy_price_history
+                WHERE symbol IN ({placeholders}) AND guild_id IN (
+                    SELECT guild_id FROM economy_assets
+                    WHERE symbol IN ({placeholders}) AND company_id IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM economy_holdings h
+                        WHERE h.guild_id=economy_assets.guild_id
+                        AND h.symbol=economy_assets.symbol
+                    )
+                )''',
+            (*legacy_symbols, *legacy_symbols),
+        )
+        await conn.execute(
+            f'''DELETE FROM economy_assets
+                WHERE symbol IN ({placeholders}) AND company_id IS NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM economy_holdings h
+                    WHERE h.guild_id=economy_assets.guild_id
+                    AND h.symbol=economy_assets.symbol
+                )''',
+            legacy_symbols,
+        )
 
     async def close(self):
-        if self.conn:
-            await self.conn.close()
-            self.conn = None
+        async with self._lock:
+            conn = self.conn
+            if conn is not None:
+                await conn.close()
+                self.conn = None
 
     async def execute(self, sql, params=()):
-        if self.conn is None:
-            raise RuntimeError('Database is not connected')
-        async with self.conn.execute(sql, params) as cur:
-            await self.conn.commit()
-            return cur
+        async with self._lock:
+            conn = self.conn
+            if conn is None:
+                raise RuntimeError('Database is not connected')
+            async with conn.execute(sql, params) as cur:
+                await conn.commit()
+                return cur
 
     async def fetchone(self, sql, params=()):
-        if self.conn is None:
-            raise RuntimeError('Database is not connected')
-        async with self.conn.execute(sql, params) as cur:
-            return await cur.fetchone()
+        async with self._lock:
+            conn = self.conn
+            if conn is None:
+                raise RuntimeError('Database is not connected')
+            async with conn.execute(sql, params) as cur:
+                return await cur.fetchone()
 
     async def fetchall(self, sql, params=()):
-        if self.conn is None:
-            raise RuntimeError('Database is not connected')
-        async with self.conn.execute(sql, params) as cur:
-            return await cur.fetchall()
+        async with self._lock:
+            conn = self.conn
+            if conn is None:
+                raise RuntimeError('Database is not connected')
+            async with conn.execute(sql, params) as cur:
+                return await cur.fetchall()
+
+    @asynccontextmanager
+    async def transaction(self):
+        async with self._lock:
+            conn = self.conn
+            if conn is None:
+                raise RuntimeError('Database is not connected')
+            await conn.execute('BEGIN IMMEDIATE')
+            try:
+                yield conn
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
 
     async def audit(self, guild_id, actor_id, action, target_id=None, details=''):
         await self.execute('INSERT INTO audit(guild_id,actor_id,target_id,action,details) VALUES(?,?,?,?,?)', (guild_id, actor_id, target_id, action, details))

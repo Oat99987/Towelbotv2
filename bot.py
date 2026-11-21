@@ -8,6 +8,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from database import Database
 from common import embed
+from cogs.core import resolve_command_prefix
 
 BASE = Path(__file__).parent
 load_dotenv(BASE / '.env')
@@ -35,7 +36,7 @@ class TowelBot(commands.Bot):
         intents.members = True
         intents.message_content = True
         intents.moderation = True
-        super().__init__(command_prefix=lambda _bot, _msg: self.config.get('prefix', '!'), intents=intents, help_command=None)
+        super().__init__(command_prefix=resolve_command_prefix, intents=intents, help_command=None)
         self.db = Database(BASE / 'data' / 'nation.sqlite3')
 
     def save_config(self):
@@ -46,7 +47,7 @@ class TowelBot(commands.Bot):
         modules = [
             'core', 'setup', 'border', 'moderation', 'automod', 'elections', 'community',
             'reaction_roles', 'reminders_polls', 'starboard', 'tickets', 'voice',
-            'announcements_stats', 'logging', 'nation_system',
+            'announcements_stats', 'logging', 'nation_system', 'economy', 'police',
         ]
         for module in modules:
             try:

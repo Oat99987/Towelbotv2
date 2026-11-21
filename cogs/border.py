@@ -3,7 +3,7 @@ import json
 import discord
 from discord import app_commands
 from discord.ext import commands
-from common import embed, status_embed, audit
+from common import embed, status_embed, audit, configured_role
 
 VERIFICATION_NAME = '🚧-verification'
 
@@ -125,7 +125,7 @@ class BorderPanel(discord.ui.View):
     async def apply(self, interaction, button):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message(embed=status_embed('Server required','Use this application inside the server.','error'))
-        citizen = self.cog.get_role(interaction.guild, 'citizen')
+        citizen = await self.cog.get_role(interaction.guild, 'citizen')
         if citizen and citizen in interaction.user.roles:
             return await interaction.response.send_message(embed=status_embed('Already a citizen','Your Discord account already has the configured Citizen role.','info'))
         existing = await self.cog.bot.db.fetchone("SELECT id FROM applications WHERE guild_id=? AND user_id=? AND status='pending'", (interaction.guild.id, interaction.user.id))
@@ -144,7 +144,13 @@ class ReviewView(discord.ui.View):
         self.cog, self.application_id, self.applicant_id = cog, application_id, applicant_id
 
     async def interaction_check(self, interaction):
-        staff = self.cog.get_role(interaction.guild, 'staff')
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                embed=status_embed('Server required', 'Review applications inside the server.', 'error')
+            )
+            return False
+        staff = await self.cog.get_role(guild, 'staff')
         allowed = interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild or (staff and staff in interaction.user.roles)
         if not allowed:
             await interaction.response.send_message(embed=status_embed('Nation Staff only','Only administrators or configured Nation Staff can review applications.','error'))
@@ -154,14 +160,43 @@ class ReviewView(discord.ui.View):
     @discord.ui.button(label='Approve', style=discord.ButtonStyle.success, emoji='✅')
     async def approve(self, interaction, button):
         await interaction.response.defer(thinking=True)
-        row = await self.cog.bot.db.fetchone('SELECT status FROM applications WHERE id=? AND guild_id=?', (self.application_id, interaction.guild.id))
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.followup.send(
+                embed=status_embed('Server required', 'Review applications inside the server.', 'error')
+            )
+        row = await self.cog.bot.db.fetchone('SELECT status FROM applications WHERE id=? AND guild_id=?', (self.application_id, guild.id))
         if not row or row['status'] != 'pending':
             return await interaction.followup.send(embed=status_embed('Already reviewed','This application has already been approved or denied.','warning'))
-        member = interaction.guild.get_member(self.applicant_id)
-        citizen = self.cog.get_role(interaction.guild, 'citizen')
-        immigrant = self.cog.get_role(interaction.guild, 'immigrant')
-        if not member or not citizen:
-            return await interaction.followup.send(embed=status_embed('Review unavailable','The applicant left the server or the configured Citizen role is missing.','error'))
+        try:
+            member = await self.cog.get_member(guild, self.applicant_id)
+        except discord.HTTPException as error:
+            self.cog.logger.warning(
+                'Could not fetch applicant %s in guild %s while reviewing application %s: %s',
+                self.applicant_id,
+                guild.id,
+                self.application_id,
+                error,
+            )
+            return await interaction.followup.send(embed=status_embed(
+                'Applicant lookup failed',
+                f'Discord could not confirm the applicant is still in the server (error {error.status}). Try again.',
+                'error',
+            ))
+        if member is None:
+            return await interaction.followup.send(embed=status_embed(
+                'Applicant no longer in server',
+                'The applicant has left the server, so this application cannot be approved.',
+                'error',
+            ))
+        citizen = await self.cog.get_role(guild, 'citizen')
+        if citizen is None:
+            return await interaction.followup.send(embed=status_embed(
+                'Citizen role not configured',
+                'Select the correct Citizen role in `/setup` → Configure roles, or rerun `/border setup`, then review again.',
+                'error',
+            ))
+        immigrant = await self.cog.get_role(guild, 'immigrant')
         try:
             if immigrant and immigrant in member.roles:
                 await member.remove_roles(immigrant, reason=f'Application #{self.application_id} approved')
@@ -170,13 +205,13 @@ class ReviewView(discord.ui.View):
             return await interaction.followup.send(embed=status_embed('Role hierarchy issue','Move TowelBot above the Immigrant and Citizen roles, then try again.','error'))
         await self.cog.bot.db.execute("UPDATE applications SET status='approved',reviewer_id=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?", (interaction.user.id, self.application_id))
         try:
-            await member.send(f'Your citizenship application in **{interaction.guild.name}** has been approved. Welcome, citizen!')
+            await member.send(f'Your citizenship application in **{guild.name}** has been approved. Welcome, citizen!')
         except discord.HTTPException:
             pass
         for child in self.children:
             setattr(child, 'disabled', True)
         await interaction.message.edit(view=self)
-        await audit(self.cog.bot, interaction.guild, interaction.user, 'Citizenship application approved', member, f'Application #{self.application_id}')
+        await audit(self.cog.bot, guild, interaction.user, 'Citizenship application approved', member, f'Application #{self.application_id}')
         await interaction.followup.send(embed=status_embed('Application approved','Immigrant role removed and Citizen role assigned.','success'))
 
     @discord.ui.button(label='Deny', style=discord.ButtonStyle.danger, emoji='✖️')
@@ -214,9 +249,17 @@ class Border(commands.Cog):
         self.logger = __import__('logging').getLogger('TowelBot.border')
         self.setup_drafts = {}
 
-    def get_role(self, guild, key):
-        role_id = self.bot.config.get('roles', {}).get(key)
-        return guild.get_role(int(role_id)) if role_id else None
+    async def get_role(self, guild, key):
+        return await configured_role(guild, self.bot, key)
+
+    async def get_member(self, guild, user_id):
+        member = guild.get_member(user_id)
+        if member is not None:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except discord.NotFound:
+            return None
 
     async def ensure_role(self, guild, name, key, color):
         found = discord.utils.get(guild.roles, name=name)
@@ -227,6 +270,7 @@ class Border(commands.Cog):
                 f'The **{name}** role is above TowelBot in the role hierarchy. Move TowelBot above it and run setup again.'
             )
         self.bot.config.setdefault('roles', {})[key] = found.id
+        await self.bot.db.set_config(guild.id, 'roles', key, found.id)
         return found
 
     async def ensure_verification_channel(self, guild, immigrant, citizen):
@@ -310,23 +354,47 @@ class Border(commands.Cog):
         return immigrant, citizen, verification, changed, assigned
 
     async def submit_application(self, interaction, answers):
-        cursor = await self.bot.db.execute('INSERT INTO applications(guild_id,user_id,answers) VALUES(?,?,?)', (interaction.guild.id, interaction.user.id, json.dumps(answers, ensure_ascii=False)))
+        guild = interaction.guild
+        if guild is None:
+            raise ValueError('Citizenship applications can only be submitted inside a server.')
+        review = await self.get_application_review_channel(guild)
+        cursor = await self.bot.db.execute('INSERT INTO applications(guild_id,user_id,answers) VALUES(?,?,?)', (guild.id, interaction.user.id, json.dumps(answers, ensure_ascii=False)))
         app_id = cursor.lastrowid
-        review_id = self.bot.config.get('channels', {}).get('application_review')
-        review = interaction.guild.get_channel(int(review_id)) if review_id else None
-        if review is None:
-            review = discord.utils.get(interaction.guild.text_channels, name='📋-application-review')
-        if review is None:
-            raise RuntimeError('Application review channel missing. Run /setup first.')
         description = '\n\n'.join(f'**{discord.utils.escape_markdown(key)}**\n{discord.utils.escape_markdown(value)}' for key, value in answers.items())
         card = embed(f'Citizenship application #{app_id}', description[:4000], 'info')
         card.add_field(name='Applicant', value=f'{interaction.user.mention}\n`{interaction.user.id}`', inline=False)
         await review.send(embed=card, view=ReviewView(self, app_id, interaction.user.id))
 
+    async def get_application_review_channel(self, guild):
+        review_id = await self.bot.db.get_config(guild.id, 'channels', 'application_review')
+        if review_id is None:
+            review_id = self.bot.config.get('channels', {}).get('application_review')
+
+        review = None
+        if review_id is not None:
+            try:
+                review = guild.get_channel(int(review_id))
+            except (TypeError, ValueError):
+                review = None
+        else:
+            review = (
+                discord.utils.get(guild.text_channels, name='📋・application-review')
+                or discord.utils.get(guild.text_channels, name='📋-application-review')
+            )
+            if review is not None:
+                await self.bot.db.set_config(guild.id, 'channels', 'application_review', review.id)
+
+        if review is None or review.type not in (discord.ChannelType.text, discord.ChannelType.news):
+            raise ValueError(
+                'Application review channel is not configured. An administrator can set it with '
+                '`/border application-channel`.'
+            )
+        return review
+
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        immigrant = self.get_role(member.guild, 'immigrant')
-        citizen = self.get_role(member.guild, 'citizen')
+        immigrant = await self.get_role(member.guild, 'immigrant')
+        citizen = await self.get_role(member.guild, 'citizen')
         if immigrant and not member.bot and not (citizen and citizen in member.roles):
             try:
                 await member.add_roles(immigrant, reason='New member receives immigrant access')
@@ -334,6 +402,20 @@ class Border(commands.Cog):
                 self.logger.warning('Cannot assign immigrant role in guild %s', member.guild.id)
 
     border = app_commands.Group(name='border', description='Citizenship border and immigration system')
+
+    @border.command(name='application-channel', description='Set the channel where citizenship applications are reviewed.')
+    @app_commands.guild_only()
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def set_application_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message(
+                embed=status_embed('Server required', 'Run this command inside a server.', 'error')
+            )
+        await self.bot.db.set_config(guild.id, 'channels', 'application_review', channel.id)
+        await interaction.response.send_message(
+            embed=status_embed('Application channel set', f'New citizenship applications will be sent to {channel.mention}.', 'success')
+        )
 
     @border.command(name='setup', description='Configure immigrant/citizen roles, lock all channels, and create the verification channel.')
     @app_commands.guild_only()
